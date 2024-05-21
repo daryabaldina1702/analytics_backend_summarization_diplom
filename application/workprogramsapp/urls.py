@@ -63,6 +63,7 @@ from .views import WorkProgramFullDetailsWithDisciplineCodeView, ZunManyViewSet,
 from .views import WorkProgramsListApi, UserGroups, TimeoutTest, WorkProgramEditorsUpdateView
 from .views import СertificationEvaluationToolListAPI, СertificationEvaluationToolDetailAPI
 from .workprogram_additions.views import CopyContentOfWorkProgram
+from .views import SummarizationsListApi, SummarizationDetailApi, SummarizeTextView, RateOfSummarizationCreateView,ReplaceDescriptionWithSummary
 
 # Контроллеры
 
@@ -331,5 +332,10 @@ urlpatterns = [
     url(r'^', include('workprogramsapp.bibliographic_reference.urls')),
     url(r'^', include('workprogramsapp.disciplineblockmodules.urls')),
 
-
+    #Автореферирование
+    path('summarization/', SummarizationsListApi.as_view(), name='summarizations-list'),
+    path('summarization/<int:pk>/', SummarizationDetailApi.as_view(), name='summarization-detail'),
+    path('summarization/summarize/', SummarizeTextView.as_view(), name='summarize-text'),
+    path('summarization/rate/create/', RateOfSummarizationCreateView.as_view(), name='rate-of-summarization-create'),
+    path('summarization/replace/', ReplaceDescriptionWithSummary.as_view(), name='replace_summary'),
 ]

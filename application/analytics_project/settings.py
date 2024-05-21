@@ -34,8 +34,8 @@ DEBUG = True
 
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 100000
 
-# ALLOWED_HOSTS = ['94.250.249.177', '94.250.249.177:8000', 'localhost', '127.0.0.1']
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+ALLOWED_HOSTS = ['94.250.249.177', '94.250.249.177:8000', 'localhost', '127.0.0.1']
+# ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
 
 # Application definition
 
@@ -69,7 +69,7 @@ INSTALLED_APPS = [
     'selection_of_keywords_for_rpd',
     'streams_app',
     'cachalot',
-    # 'django_extensions',
+    'django_extensions',
     # 'ckeditor',
     # 'ckeditor_uploader',
     # 'oauth2_provider',
@@ -128,6 +128,19 @@ WSGI_APPLICATION = 'analytics_project.wsgi.application'
 # https://docs.djangoproject.com/en/2.2/ref/settings/#databases
 
 DATABASES = {'default': env.db('DATABASE_URL')}
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': 'analytics_db',
+#         'USER': 'postgres',
+#         'PASSWORD': 'postgres',
+#         'HOST': 'localhost',
+#         'PORT': '5435',
+#         'OPTIONS': {
+#             'client_encoding': 'utf-8',
+#         },
+#     }
+# }
 
 # Password validation
 # https://docs.djangoproject.com/en/2.2/ref/settings/#auth-password-validators
@@ -318,7 +331,8 @@ sentry_sdk.init(
         DjangoIntegration(),
     ],
 
-    # Set traces_sample_rate to 1.0 to capture 100%
+    # Set traces_sample_rate to 1.0
+    #  to capture 100%
     # of transactions for performance monitoring.
     # We recommend adjusting this value in production.
     traces_sample_rate=1.0,
@@ -328,12 +342,12 @@ sentry_sdk.init(
     send_default_pii=True
 )
 
-"""CACHES = {
+CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
         'LOCATION': 'cache:11211',
     }
-}"""
+}
 
 if os.environ['DEBUG'] == True:
     LOGGING = {
@@ -382,12 +396,3 @@ if os.environ['DEBUG'] == True:
             }
         },
     }
-
-
-"""LOGGING = {'version': 1,
-    "handlers":{"console": {"class": "logging.StreamHandler"},},
-    "loggers": {
-        "django.db.backends": {"handlers": ['console'],
-                               "level":"DEBUG"}
-    }
-}"""

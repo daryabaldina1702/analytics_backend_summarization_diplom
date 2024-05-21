@@ -7,7 +7,6 @@ import pandas
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from django_cte import With
 from django_filters.rest_framework import DjangoFilterBackend
 from django_super_deduper.merge import MergedModelInstance
 from drf_yasg2 import openapi
@@ -20,11 +19,10 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+import datetime
+from transformers import AutoTokenizer, T5ForConditionalGeneration
 
 from dataprocessing.models import Items
-from .ap_improvment.module_ze_counter import make_modules_cte_up,  make_modules_cte_up_for_wp
-from .ap_improvment.serializers import AcademicPlanForAPSerializer, WorkProgramSerializerForList, \
-    WorkProgramSerializerCTE, DisciplineBlockForWPinFSSCTESerializer
 from .educational_program.search_filters import CompetenceFilter
 from .expertise.models import Expertise, UserExpertise
 from .folders_ans_statistic.models import WorkProgramInFolder, AcademicPlanInFolder, DisciplineBlockModuleInFolder
@@ -33,6 +31,7 @@ from .models import AcademicPlan, ImplementationAcademicPlan, WorkProgramChangeI
 from .models import FieldOfStudy, BibliographicReference, СertificationEvaluationTool
 from .models import WorkProgram, OutcomesOfWorkProgram, PrerequisitesOfWorkProgram, EvaluationTool, DisciplineSection, \
     Topic, Indicator, Competence
+from .models import Summarization, RateOfSummarization
 from .notifications.models import UserNotification
 # Права доступа
 from .permissions import IsOwnerOrReadOnly, IsRpdDeveloperOrReadOnly, IsDisciplineBlockModuleEditor, \
@@ -59,6 +58,7 @@ from .serializers import OutcomesOfWorkProgramCreateSerializer, СertificationEv
 from .serializers import TopicSerializer, SectionSerializer, TopicCreateSerializer
 from .serializers import WorkProgramSerializer, WorkProgramEditorsUpdateSerializer
 from .workprogram_additions.models import StructuralUnit, UserStructuralUnit
+from .serializers import SummarizationSerializer, RateOfSummarizationSerializer, ModelSerializer
 
 """"Удалены старые views с использованием джанго рендеринга"""
 """Блок реализации API"""
@@ -75,13 +75,17 @@ from .workprogram_additions.models import StructuralUnit, UserStructuralUnit
 
 
 class WorkProgramsListApi(generics.ListAPIView):
-    queryset = WorkProgram.objects.all().select_related("structural_uni").prefetch_related("expertise_with_rpd", "editors", "prerequisites", "outcomes")
-    serializer_class = WorkProgramSerializerForList
+    queryset = WorkProgram.objects.all()
+    serializer_class = WorkProgramSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['discipline_code', 'title', 'editors__last_name', 'editors__first_name', 'id']
     filterset_fields = ['language',
+                        'work_program_in_change_block__discipline_block_module__descipline_block__academic_plan__academic_plan_in_field_of_study__field_of_study__title',
+                        'work_program_in_change_block__discipline_block_module__descipline_block__academic_plan__academic_plan_in_field_of_study__field_of_study__number',
+                        'work_program_in_change_block__discipline_block_module__descipline_block__academic_plan__educational_profile',
                         'qualification',
                         'prerequisites', 'outcomes', 'structural_unit__title',
+                        'work_program_in_change_block__discipline_block_module__descipline_block__academic_plan__academic_plan_in_field_of_study__title',
                         'editors__last_name', 'editors__first_name', 'work_status',
                         'expertise_with_rpd__expertise_status'
                         ]
@@ -107,9 +111,6 @@ class WorkProgramsListApi(generics.ListAPIView):
             queryset = WorkProgram.objects.filter()
         return queryset
 
-
-    def get(self, request, *args, **kwargs):
-        return self.list(request, *args, **kwargs)
 
 class IndicatorListAPIView(generics.ListAPIView):
     serializer_class = IndicatorListSerializer
@@ -738,84 +739,47 @@ class WorkProgramEditorsUpdateView(generics.UpdateAPIView):
         return Response(WorkProgramSerializer(instance, context={'request': request}).data)
 
 
-# Префетчи с экспертизами и юзерэкспертизами, передавать в сериализеры все ОС префетчами. Посмотреть сериализер на
-# наличие неиспользуемых полей. Сделать другую подгрузку Планов
 class WorkProgramDetailsView(generics.RetrieveAPIView):
-    queryset = WorkProgram.objects.all().prefetch_related("expertise_with_rpd",
-                                                          "expertise_with_rpd__expertse_users_in_rpd",
-                                                          "discipline_sections",
-                                                          "discipline_sections__topics",
-                                                          "discipline_sections__evaluation_tools",
-                                                          "prerequisitesofworkprogram_set",
-                                                          "outcomesofworkprogram_set",
-                                                          "certification_evaluation_tools",
-                                                          "editors"
-                                                          )
-    serializer_class = WorkProgramSerializerCTE
+    queryset = WorkProgram.objects.all()
+    serializer_class = WorkProgramSerializer
     permission_classes = [IsRpdDeveloperOrReadOnly]
-    def generate_modules(self, wp):
-        work_program_in_change_block = []
-        modules_grouped={}
-        cte = With(None, "module_cte", False)
-        cte.query = make_modules_cte_up_for_wp(cte, wp.id).query
-        #print(cte.queryset().with_cte(cte).filter(descipline_block__id__isnull=False))
-        modules = cte.queryset().with_cte(cte).filter(descipline_block__id__isnull=False)
-        for module in modules:
-            if modules_grouped.get(module["recursive_id"]) is not None:
-                modules_grouped[module["recursive_id"]]["upper_modules"].append(module["id"])
-            else:
-                modules_grouped[module["recursive_id"]] = {"id":module["recursive_id"], "name":module["recursive_name"], "descipline_block": None, "upper_modules": [module["id"]]}
-
-        for modules_dict in modules_grouped.values():
-            upper_modules = modules_dict.pop("upper_modules")
-            discipline_block_module = modules_dict
-            discipline_block_module["descipline_block"] = DisciplineBlockForWPinFSSCTESerializer(
-                DisciplineBlock.objects.filter(modules_in_discipline_block__id__in=upper_modules).prefetch_related(
-                    "academic_plan__academic_plan_in_field_of_study",
-                    "academic_plan__academic_plan_in_field_of_study__field_of_study"), many=True).data
-            cb_dict = {"id": None, "discipline_block_module": discipline_block_module}
-            work_program_in_change_block.append(cb_dict)
-
-        return work_program_in_change_block
-
-
 
     def get(self, request, **kwargs):
-        queryset = self.get_object()
-
-        serializer = WorkProgramSerializerCTE(queryset, context={'request': request})
+        queryset = WorkProgram.objects.filter(pk=self.kwargs['pk'])
+        serializer = WorkProgramSerializer(queryset, many=True, context={'request': request})
         if len(serializer.data) == 0:
             return Response({"detail": "Not found."}, status.HTTP_404_NOT_FOUND)
-
-        newdata = dict(serializer.data)
-        wp = queryset
-        expertise = wp.expertise_with_rpd.all().first()
+        newdata = dict(serializer.data[0])
         try:
-
             newdata.update(
-                {"expertise_status": expertise.expertise_status})
+                {"expertise_status": Expertise.objects.get(work_program__id=self.kwargs['pk']).expertise_status})
             newdata.update(
-                {"use_chat_with_id_expertise": expertise.pk})
+                {"use_chat_with_id_expertise": Expertise.objects.get(work_program__id=self.kwargs['pk']).pk})
 
             if request.user.is_expertise_master:
                 newdata.update({"can_see_comments": True})
             else:
                 newdata.update({"can_see_comments": False})
 
-            if (expertise.expertise_status == "WK" or expertise.expertise_status == "RE") and \
-                    (wp.owner == request.user or request.user in wp.editors.all()):
+            if (Expertise.objects.get(work_program__id=self.kwargs['pk']).expertise_status == "WK" or
+                Expertise.objects.get(work_program__id=self.kwargs['pk']).expertise_status == "RE") and (
+                    WorkProgram.objects.get(
+                        pk=self.kwargs['pk']).owner == request.user or WorkProgram.objects.filter(pk=self.kwargs['pk'],
+                                                                                                  editors__in=[
+                                                                                                      request.user])):
                 newdata.update({"can_edit": True})
             else:
                 newdata.update({"can_edit": False})
-        except AttributeError:  # Expertise does not Exisits
-            if wp.owner == request.user or request.user in wp.editors.all() or request.user.is_superuser:
+        except Expertise.DoesNotExist:
+            if WorkProgram.objects.get(pk=self.kwargs['pk']).owner == request.user or WorkProgram.objects.filter(
+                    pk=self.kwargs['pk'], editors__in=[request.user]) or request.user.is_superuser:
                 newdata.update({"can_edit": True, "expertise_status": False})
             else:
                 newdata.update({"can_edit": False, "expertise_status": False})
             newdata.update({"use_chat_with_id_expertise": None})
 
         try:
-            ue = expertise.expertse_users_in_rpd.filter(expert=request.user)
+            ue = UserExpertise.objects.filter(expert=request.user, expertise__work_program=self.kwargs['pk'])
             ue_save_obj = None
             for user_exp_object in ue:
                 ue_save_obj = user_exp_object
@@ -829,7 +793,7 @@ class WorkProgramDetailsView(generics.RetrieveAPIView):
 
             newdata.update({"can_see_comments": True})
 
-            if expertise.expertise_status in ["EX", "WK", "RE"]:
+            if Expertise.objects.get(work_program__id=self.kwargs['pk']).expertise_status in ["EX", "WK", "RE"]:
                 newdata.update({"can_comment": True})
                 newdata.update({"user_expertise_id": ue.id})
             else:
@@ -843,16 +807,18 @@ class WorkProgramDetailsView(generics.RetrieveAPIView):
                     newdata.update({"your_approve_status": "RE"})
             else:
                 newdata.update({"can_approve": True})
-            if expertise.expertise_status == "WK" or expertise.expertise_status == "AC":
+            if Expertise.objects.get(work_program__id=self.kwargs['pk']).expertise_status == "WK" or \
+                    Expertise.objects.get(work_program__id=self.kwargs['pk']).expertise_status == "AC":
                 newdata.update({"can_approve": False})
         except:
             newdata.update({"can_comment": False})
             newdata.update({"can_approve": False})
-        if (request.user.is_expertise_master == True or request.user in  wp.editors.all()) and  wp.work_status == "w":
+        if (request.user.is_expertise_master == True or WorkProgram.objects.filter(
+                pk=self.kwargs['pk'], editors__in=[request.user])) and queryset[0].work_status == "w":
             newdata.update({"can_archive": True})
         else:
             newdata.update({"can_archive": False})
-        if request.user.is_expertise_master and  wp.work_status == "a":
+        if request.user.is_expertise_master and queryset[0].work_status == "a":
             newdata.update({"can_return_from_archive": True})
         else:
             newdata.update({"can_return_from_archive": False})
@@ -863,13 +829,14 @@ class WorkProgramDetailsView(generics.RetrieveAPIView):
         else:
             newdata.update({"can_add_to_folder": True})
             newdata.update({"is_student": False})
-        newdata.update({"work_program_in_change_block": self.generate_modules(wp)})
-        """try:
-            newdata.update({"rating": wp.work_program_in_folder.filter(folder__owner=self.request.user).first.work_program_rating})
-            newdata.update({"id_rating": wp.work_program_in_folder.filter(folder__owner=self.request.user).first.id})
+        try:
+            newdata.update({"rating": WorkProgramInFolder.objects.get(work_program=self.kwargs['pk'],
+                                                                      folder__owner=self.request.user).work_program_rating})
+            newdata.update({"id_rating": WorkProgramInFolder.objects.get(work_program=self.kwargs['pk'],
+                                                                         folder__owner=self.request.user).id})
         except:
 
-            newdata.update({"rating": False})"""
+            newdata.update({"rating": False})
         """competences = Competence.objects.filter(
             indicator_in_competencse__zun__wp_in_fs__work_program__id=self.kwargs['pk']).distinct()
         competences_dict = []
@@ -909,7 +876,6 @@ class WorkProgramDetailsView(generics.RetrieveAPIView):
             competences_dict.append({"id": competence.id, "name": competence.name, "number": competence.number,
                                      "zuns": zuns_array})
         newdata.update({"competences": competences_dict})"""
-
         newdata = OrderedDict(newdata)
         return Response(newdata, status=status.HTTP_200_OK)
 
@@ -2202,9 +2168,10 @@ class AcademicPlanListAPIView(generics.ListAPIView):
     filterset_fields = ['academic_plan_in_field_of_study__qualification']
     permission_classes = [IsRpdDeveloperOrReadOnly]
 
+
 class AcademicPlanListShortAPIView(generics.ListAPIView):
     serializer_class = AcademicPlanShortSerializer
-    queryset = AcademicPlan.objects.all().prefetch_related("academic_plan_in_field_of_study", "academic_plan_in_field_of_study__field_of_study", "academic_plan_in_field_of_study__structural_unit", "author")
+    queryset = AcademicPlan.objects.all()
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['academic_plan_in_field_of_study__qualification',
                      'academic_plan_in_field_of_study__title',
@@ -2249,16 +2216,13 @@ class AcademicPlanUpdateView(generics.UpdateAPIView):
 
 class AcademicPlanDetailsView(generics.RetrieveAPIView):
     queryset = AcademicPlan.objects.all()
-    serializer_class = AcademicPlanForAPSerializer
+    serializer_class = AcademicPlanSerializer
     permission_classes = [IsRpdDeveloperOrReadOnly]
-    #@print_sql_decorator(count_only=False)
+
     def get(self, request, **kwargs):
 
-        queryset = AcademicPlan.objects.filter(pk=self.kwargs['pk']).prefetch_related(
-            "discipline_blocks_in_academic_plan", "discipline_blocks_in_academic_plan__modules_in_discipline_block",
-            "academic_plan_in_field_of_study", "academic_plan_in_field_of_study__field_of_study",
-            "academic_plan_in_field_of_study__field_of_study").select_related("author")
-        serializer = AcademicPlanForAPSerializer(queryset, many=True, context={'request': request})
+        queryset = AcademicPlan.objects.filter(pk=self.kwargs['pk'])
+        serializer = AcademicPlanSerializer(queryset, many=True, context={'request': request})
         if len(serializer.data) == 0:
             return Response({"detail": "Not found."}, status.HTTP_404_NOT_FOUND)
         newdata = dict(serializer.data[0])
@@ -2494,6 +2458,92 @@ class BugsLogView(generics.CreateAPIView):
     #parser_classes = (parsers.FormParser, parsers.MultiPartParser)
     serializer_class = BugsLogSerializer
     queryset = BugsLog.objects.all()
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+#viws для моделей по автореферированию
+class SummarizationsListApi(generics.ListAPIView):
+    queryset = Summarization.objects.all()
+    serializer_class = SummarizationSerializer
+    permission_classes = [IsRpdDeveloperOrReadOnly]
+
+class SummarizationDetailApi(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Summarization.objects.all()
+    serializer_class = SummarizationSerializer
+    permission_classes = [IsRpdDeveloperOrReadOnly]
+
+class SummarizeTextView(generics.CreateAPIView):
+    name = 'Создание автореферата'
+    permission_classes = [IsRpdDeveloperOrReadOnly]
+    serializer_class = ModelSerializer
+    def create(self, request, *args, **kwargs):
+        if request.method == 'POST':
+            data = request.data
+            
+            # Извлекаем work_program_id из данных запроса
+            work_program_id = data.get('work_program_id')
+
+            # Полученные гиперпараметры из JSON-запроса
+            max_length = data.get('max_length', 600)
+            special_token = data.get('special_token', False)
+            truncation = data.get('truncation', False)
+
+            # Применяем модель для суммаризации текста
+            model_name = "./diplom_model"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = T5ForConditionalGeneration.from_pretrained(model_name)
+
+            try:
+                work_program = WorkProgram.objects.get(id=work_program_id)
+                description_text = work_program.description
+            except WorkProgram.DoesNotExist:
+                return Response({'error': 'WorkProgram not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            input_ids = tokenizer(
+                [description_text],
+                max_length=max_length,
+                add_special_tokens=special_token,
+                padding="max_length",
+                truncation=truncation,
+                return_tensors="pt"
+            )["input_ids"]
+
+            output_ids = model.generate(
+                input_ids=input_ids
+            )[0]
+
+            summary = tokenizer.decode(output_ids, skip_special_tokens=True)
+
+            # Создаем и сохраняем объект Summarization в базе данных
+            summarization = Summarization.objects.create(summarize_text=summary, work_program=work_program)
+            
+            return Response({'summary': summary}, status=status.HTTP_200_OK)
+        
+        return Response({'error': 'Invalid HTTP method'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+class ReplaceDescriptionWithSummary(generics.UpdateAPIView):
+    permission_classes = [IsRpdDeveloperOrReadOnly]
+    serializer_class = SummarizationSerializer
+
+    def update(self, request, *args, **kwargs):
+        work_program_id = self.request.data.get('work_program')
+        try:
+            work_program = WorkProgram.objects.get(pk=work_program_id)
+            summarization = Summarization.objects.get(work_program_id=work_program)
+            work_program.description = summarization.summarize_text
+            work_program.save()
+            return Response(status=status.HTTP_200_OK)
+        except WorkProgram.DoesNotExist:
+            return Response({'error': 'WorkProgram not found'}, status=status.HTTP_404_NOT_FOUND)
+        except Summarization.DoesNotExist:
+            return Response({'error': 'Summarization not found for this WorkProgram'}, status=status.HTTP_404_NOT_FOUND)
+
+class RateOfSummarizationCreateView(generics.CreateAPIView):
+    name = 'Отзыв о работе модели автореферирования'
+    permission_classes = [IsRpdDeveloperOrReadOnly]
+    serializer_class = RateOfSummarizationSerializer
+    queryset = RateOfSummarization.objects.all()
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

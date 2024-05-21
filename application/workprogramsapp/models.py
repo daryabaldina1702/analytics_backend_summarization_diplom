@@ -1564,3 +1564,21 @@ class BugsLog(models.Model):
 
     def __str__(self):
         return str(self.user) + ' / ' + str(self.title) + ' / ' + str(self.date)
+
+class Summarization(models.Model):
+    '''
+    Модель для автореферирования описаний рабочих программ
+    '''
+    summarize_text = models.CharField(max_length=5000, blank=True, null=True, verbose_name="Автореферат")
+    work_program = models.ForeignKey('WorkProgram', on_delete=models.CASCADE, verbose_name='Рабочая программа',
+                                     related_name='summarization')
+
+class RateOfSummarization(models.Model):
+    '''
+    Оценка работы модели  автореферирования
+    '''
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    rating_score = models.BooleanField(verbose_name="Понравился реферат", blank=True, null=True)
+    comment_text = models.CharField(verbose_name="Комментарий к оценке", max_length=16384)
+    summarization = models.ForeignKey(Summarization, on_delete = models.CASCADE, db_column='summarization_id')
+    date = models.DateTimeField(editable=True, auto_now_add=True, blank=True, null=True)
